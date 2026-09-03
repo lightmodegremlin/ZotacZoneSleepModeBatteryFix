@@ -1,0 +1,10 @@
+[Unit]
+Description=Disable noisy ZOTAC ZONE USB and charger wake sources
+After=systemd-udev-trigger.service
+
+[Service]
+Type=oneshot
+ExecStart=/etc/zotac-sleep-fix/apply boot
+
+[Install]
+WantedBy=multi-user.target

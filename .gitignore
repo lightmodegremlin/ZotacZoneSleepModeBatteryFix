@@ -1,0 +1,16 @@
+# Machine-specific diagnostic output; do not publish firmware IDs, EFI entries,
+# partition UUIDs, or local measurement artifacts.
+bootconf.txt
+efi-boot.txt
+iommu-test-boot.txt
+*.log
+*.journal
+
+# One-shot diagnosis tooling kept locally; it is not required for installation.
+dump-efi-boot.sh
+zotac-iommu-ab-test
+zotac-iommu-ab-test.service
+
+# Editor and OS files
+.DS_Store
+*.swp

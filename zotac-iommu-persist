@@ -1,0 +1,171 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SOURCE=/etc/default/grub-steamos
+STATE_DIR=/var/lib/zotac-sleep-fix
+BACKUP=${STATE_DIR}/grub-steamos.original
+MODIFIED_HASH=${STATE_DIR}/grub-steamos.modified.sha256
+EFI_CFG=/efi/EFI/steamos/grub.cfg
+
+ROOT_WAS_READONLY=0
+EFI_WAS_RO=0
+EFI_TARGET=
+TEMP_FILE=
+
+die() {
+    echo "ERROR: $*" >&2
+    exit 1
+}
+
+need_root() {
+    [[ ${EUID} -eq 0 ]] || die "root 권한이 필요합니다."
+}
+
+cleanup() {
+    local rc=$?
+    trap - EXIT
+    if [[ -n ${TEMP_FILE:-} ]]; then
+        rm -f "${TEMP_FILE}"
+    fi
+    if [[ ${EFI_WAS_RO:-0} -eq 1 && -n ${EFI_TARGET:-} ]]; then
+        sync
+        mount -o remount,ro "${EFI_TARGET}" || true
+    fi
+    if [[ ${ROOT_WAS_READONLY:-0} -eq 1 ]]; then
+        steamos-readonly enable || true
+    fi
+    exit "${rc}"
+}
+
+make_root_writable() {
+    if [[ $(steamos-readonly status) == "enabled" ]]; then
+        steamos-readonly disable
+        ROOT_WAS_READONLY=1
+    fi
+}
+
+make_efi_writable() {
+    test -r "${EFI_CFG}" || die "${EFI_CFG}를 읽을 수 없습니다."
+    EFI_TARGET=$(findmnt -n -o TARGET -T "${EFI_CFG}")
+    local options
+    options=$(findmnt -n -o OPTIONS -T "${EFI_CFG}")
+    if ! grep -qw rw <<<"${options}"; then
+        mount -o remount,rw "${EFI_TARGET}"
+        EFI_WAS_RO=1
+    fi
+}
+
+restore_mounts_now() {
+    if [[ ${EFI_WAS_RO} -eq 1 ]]; then
+        sync
+        mount -o remount,ro "${EFI_TARGET}"
+        EFI_WAS_RO=0
+    fi
+    if [[ ${ROOT_WAS_READONLY} -eq 1 ]]; then
+        steamos-readonly enable
+        ROOT_WAS_READONLY=0
+    fi
+}
+
+regenerate_grub() {
+    make_efi_writable
+    update-grub
+    sync
+    if grep -qw 'amd_iommu=off' "${EFI_CFG}"; then
+        die "재생성된 GRUB에 amd_iommu=off가 아직 남아 있습니다."
+    fi
+    return 0
+}
+
+install_fix() {
+    need_root
+    [[ -r ${SOURCE} ]] || die "${SOURCE}를 읽을 수 없습니다."
+    trap cleanup EXIT
+
+    if ! grep -qw 'amd_iommu=off' "${SOURCE}"; then
+        echo "영구 IOMMU 수정은 이미 적용되어 있습니다."
+        if grep -qw 'amd_iommu=off' "${EFI_CFG}"; then
+            regenerate_grub
+        fi
+        restore_mounts_now
+        trap - EXIT
+        return
+    fi
+
+    install -d -m 0700 "${STATE_DIR}"
+    make_root_writable
+    install -m 0600 "${SOURCE}" "${BACKUP}"
+
+    TEMP_FILE=$(mktemp /tmp/zotac-grub-steamos.XXXXXX)
+    awk '
+        /^[[:space:]]*amd_iommu=off[[:space:]]*\\[[:space:]]*$/ { next }
+        { print }
+    ' "${SOURCE}" > "${TEMP_FILE}"
+    grep -qw 'amd_iommu=off' "${TEMP_FILE}" &&
+        die "${SOURCE}에서 amd_iommu=off를 안전하게 제거하지 못했습니다."
+    install -m 0644 "${TEMP_FILE}" "${SOURCE}"
+    sha256sum "${SOURCE}" | awk '{print $1}' > "${MODIFIED_HASH}"
+    rm -f "${TEMP_FILE}"
+    TEMP_FILE=
+
+    regenerate_grub
+    restore_mounts_now
+    trap - EXIT
+    echo "amd_iommu=off를 제거하고 GRUB를 재생성했습니다."
+}
+
+uninstall_fix() {
+    need_root
+    [[ -r ${BACKUP} && -r ${MODIFIED_HASH} ]] || {
+        echo "복원할 IOMMU 설정 백업이 없습니다."
+        return
+    }
+    trap cleanup EXIT
+
+    local current_hash expected_hash
+    current_hash=$(sha256sum "${SOURCE}" | awk '{print $1}')
+    expected_hash=$(<"${MODIFIED_HASH}")
+    [[ ${current_hash} == "${expected_hash}" ]] ||
+        die "${SOURCE}가 설치 후 변경되어 자동으로 덮어쓰지 않습니다."
+
+    make_root_writable
+    install -m 0644 "${BACKUP}" "${SOURCE}"
+    rm -f "${BACKUP}" "${MODIFIED_HASH}"
+
+    make_efi_writable
+    update-grub
+    sync
+    grep -qw 'amd_iommu=off' "${EFI_CFG}" ||
+        die "원래 amd_iommu=off 설정 복원에 실패했습니다."
+
+    restore_mounts_now
+    trap - EXIT
+    echo "원래 amd_iommu=off 설정과 GRUB를 복원했습니다."
+}
+
+show_status() {
+    if grep -qw 'amd_iommu=off' /proc/cmdline; then
+        echo "running kernel IOMMU fix: inactive (reboot required or not installed)"
+    else
+        echo "running kernel IOMMU fix: active"
+    fi
+    if grep -qw 'amd_iommu=off' "${SOURCE}" 2>/dev/null; then
+        echo "persistent source fix:    inactive"
+    else
+        echo "persistent source fix:    active"
+    fi
+    if [[ ! -r ${EFI_CFG} ]]; then
+        echo "next boot IOMMU fix:      unavailable (run status with sudo)"
+    elif grep -qw 'amd_iommu=off' "${EFI_CFG}"; then
+        echo "next boot IOMMU fix:      inactive"
+    else
+        echo "next boot IOMMU fix:      active"
+    fi
+}
+
+case "${1:-status}" in
+    install) install_fix ;;
+    uninstall) uninstall_fix ;;
+    status) show_status ;;
+    *) die "사용법: $0 [install|uninstall|status]" ;;
+esac

@@ -1,0 +1,6 @@
+# The built-in ZOTAC controller is noisy as an s2idle wake source.
+# The handheld's physical power button remains available for wakeup.
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="1ee9", ATTR{idProduct}=="1590", TEST=="power/wakeup", ATTR{power/wakeup}="disabled"
+
+# Cable insertion/removal must update charging state without waking the system.
+ACTION=="add|change", SUBSYSTEM=="power_supply", KERNEL=="ACAD", TEST=="power/wakeup", ATTR{power/wakeup}="disabled"

@@ -1,0 +1,13 @@
+[Unit]
+Description=Apply and measure ZOTAC ZONE s2idle fix
+Before=sleep.target
+StopWhenUnneeded=yes
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/etc/zotac-sleep-fix/apply pre
+ExecStop=/etc/zotac-sleep-fix/apply post
+
+[Install]
+WantedBy=sleep.target

@@ -1,0 +1,247 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+STATE_FILE=/run/zotac-sleep-fix.before
+TAG=zotac-sleep-fix
+
+log() {
+    logger -t "$TAG" -- "$*"
+    echo "$*"
+}
+
+set_acpi_wakeup() {
+    local device="$1"
+    local wanted="$2"
+    local current
+
+    [[ -r /proc/acpi/wakeup && -w /proc/acpi/wakeup ]] || return 0
+    current="$(
+        awk -v device="$device" '
+            $1 == device {
+                if ($3 == "*enabled") print "enabled";
+                else if ($3 == "*disabled") print "disabled";
+            }
+        ' /proc/acpi/wakeup
+    )"
+    if [[ -n "$current" && "$current" != "$wanted" ]]; then
+        echo "$device" > /proc/acpi/wakeup
+    fi
+}
+
+set_path_wakeup() {
+    local path="$1"
+    local wanted="$2"
+
+    if [[ -r "$path" && -w "$path" ]]; then
+        echo "$wanted" > "$path"
+    fi
+}
+
+for_zotac_usb() {
+    local wanted="$1"
+    local device
+
+    for device in /sys/bus/usb/devices/*; do
+        [[ -r "$device/idVendor" && -r "$device/idProduct" ]] || continue
+        if [[ "$(<"$device/idVendor")" == "1ee9" &&
+              "$(<"$device/idProduct")" == "1590" ]]; then
+            set_path_wakeup "$device/power/wakeup" "$wanted"
+        fi
+    done
+}
+
+set_ac_adapter_wakeup() {
+    local wanted="$1"
+    local adapter
+
+    for adapter in /sys/class/power_supply/*; do
+        [[ -r "$adapter/type" ]] || continue
+        case "$(<"$adapter/type")" in
+            Mains|USB|USB_C|USB_PD)
+                set_path_wakeup "$adapter/power/wakeup" "$wanted"
+                ;;
+        esac
+    done
+}
+
+apply_fix() {
+    local device
+
+    # Restore wake settings changed by the discarded USB4 experiment.
+    for device in XHC1 XHC3 XHC4 NHI0 NHI1; do
+        set_acpi_wakeup "$device" enabled
+    done
+    for device in \
+        0000:c4:00.4 \
+        0000:c6:00.3 \
+        0000:c6:00.4 \
+        0000:c6:00.5 \
+        0000:c6:00.6; do
+        set_path_wakeup "/sys/bus/pci/devices/$device/power/wakeup" enabled
+    done
+
+    # XHC0 hosts the built-in ZOTAC controller. The physical power button
+    # is a separate PNP0C0C wake source.
+    set_acpi_wakeup XHC0 disabled
+    set_path_wakeup /sys/bus/pci/devices/0000:c4:00.3/power/wakeup disabled
+    for_zotac_usb disabled
+    set_ac_adapter_wakeup disabled
+
+    # Make the next failed attempt identify a pending wake source in dmesg.
+    [[ -w /sys/power/pm_debug_messages ]] &&
+        echo 1 > /sys/power/pm_debug_messages
+    [[ -w /sys/power/pm_print_times ]] &&
+        echo 1 > /sys/power/pm_print_times
+}
+
+restore_fix() {
+    local device
+
+    for device in XHC0 XHC1 XHC3 XHC4 NHI0 NHI1; do
+        set_acpi_wakeup "$device" enabled
+    done
+    for device in \
+        0000:c4:00.3 \
+        0000:c4:00.4 \
+        0000:c6:00.3 \
+        0000:c6:00.4 \
+        0000:c6:00.5 \
+        0000:c6:00.6; do
+        set_path_wakeup "/sys/bus/pci/devices/$device/power/wakeup" enabled
+    done
+    for_zotac_usb enabled
+    set_ac_adapter_wakeup enabled
+}
+
+battery_value() {
+    local name="$1"
+    local file
+    for file in /sys/class/power_supply/BAT*/"$name"; do
+        [[ -r "$file" ]] && { cat "$file"; return 0; }
+    done
+    echo 0
+}
+
+save_before() {
+    local now energy full status
+    now="$(date +%s)"
+    energy="$(battery_value energy_now)"
+    full="$(battery_value energy_full)"
+    status="$(battery_value status)"
+    {
+        printf 'before_epoch=%q\n' "$now"
+        printf 'before_energy=%q\n' "$energy"
+        printf 'energy_full=%q\n' "$full"
+        printf 'before_status=%q\n' "$status"
+    } > "$STATE_FILE"
+}
+
+report_after() {
+    local after_epoch after_energy elapsed delta report
+
+    [[ -r "$STATE_FILE" ]] || return 0
+    # STATE_FILE is created by this root-owned helper under /run.
+    # shellcheck disable=SC1090
+    source "$STATE_FILE"
+    after_epoch="$(date +%s)"
+    after_energy="$(battery_value energy_now)"
+    elapsed=$((after_epoch - before_epoch))
+    delta=$((before_energy - after_energy))
+
+    report="$(
+        awk -v sec="$elapsed" -v duwh="$delta" -v full="$energy_full" \
+            -v state="$before_status" '
+            BEGIN {
+                if (sec <= 0) {
+                    printf "resume: 측정 시간 오류"
+                    exit
+                }
+                printf "resume: elapsed=%ds, battery_before=%s", sec, state
+                if (duwh > 0) {
+                    printf ", used=%.3fWh, average=%.3fW", duwh / 1000000,
+                        (duwh / 1000000) * 3600 / sec
+                    if (full > 0)
+                        printf ", full_capacity=%.2f%%", duwh * 100 / full
+                } else {
+                    printf ", energy_delta=%.3fWh (충전 중이거나 측정 불가)", duwh / 1000000
+                }
+            }
+        '
+    )"
+    log "$report"
+    rm -f "$STATE_FILE"
+}
+
+report_pmc_debug() {
+    local file line
+
+    for file in \
+        /sys/kernel/debug/amd_pmc/smu_fw_info \
+        /sys/kernel/debug/amd_pmc/amd_pmc_idlemask \
+        /sys/kernel/debug/amd_pmc/s0ix_stats; do
+        [[ -r "$file" ]] || continue
+        log "AMD PMC 진단: $(basename "$file")"
+        while IFS= read -r line; do
+            [[ -n "$line" ]] && log "  $line"
+        done < "$file"
+    done
+}
+
+show_status() {
+    local usb_state="not-found"
+    local pci_state="not-found"
+    local acpi_state="not-found"
+    local adapter_state="not-found"
+    local device
+
+    for device in /sys/bus/usb/devices/*; do
+        [[ -r "$device/idVendor" && -r "$device/idProduct" ]] || continue
+        if [[ "$(<"$device/idVendor")" == "1ee9" &&
+              "$(<"$device/idProduct")" == "1590" ]]; then
+            usb_state="$(cat "$device/power/wakeup" 2>/dev/null || echo unavailable)"
+        fi
+    done
+    [[ -r /sys/bus/pci/devices/0000:c4:00.3/power/wakeup ]] &&
+        pci_state="$(</sys/bus/pci/devices/0000:c4:00.3/power/wakeup)"
+    [[ -r /proc/acpi/wakeup ]] &&
+        acpi_state="$(awk '$1 == "XHC0" {print $3}' /proc/acpi/wakeup)"
+    if [[ -r /sys/class/power_supply/ACAD/power/wakeup ]]; then
+        adapter_state="$(</sys/class/power_supply/ACAD/power/wakeup)"
+    fi
+
+    echo "ZOTAC USB wakeup: $usb_state"
+    echo "XHC0 PCI wakeup:   $pci_state"
+    echo "XHC0 ACPI wakeup:  $acpi_state"
+    echo "AC adapter wakeup: $adapter_state"
+    echo "mem_sleep:         $(cat /sys/power/mem_sleep 2>/dev/null || echo unavailable)"
+    echo "hardware sleeps:   $(cat /sys/power/suspend_stats/total_hw_sleep 2>/dev/null || echo unavailable)"
+}
+
+case "${1:-status}" in
+    boot)
+        apply_fix
+        log "boot: ZOTAC USB, XHC0, 충전기 wakeup을 비활성화했습니다."
+        ;;
+    pre)
+        apply_fix
+        save_before
+        log "suspend: 측정을 시작하고 ZOTAC USB/XHC0/충전기 wakeup을 비활성화했습니다."
+        ;;
+    post)
+        report_after
+        report_pmc_debug
+        [[ -w /sys/power/pm_debug_messages ]] &&
+            echo 0 > /sys/power/pm_debug_messages
+        ;;
+    restore)
+        restore_fix
+        log "ZOTAC USB, XHC0, 충전기 wakeup을 활성화 상태로 복원했습니다."
+        ;;
+    status)
+        show_status
+        ;;
+    *)
+        echo "사용법: $0 [boot|pre|post|restore|status]" >&2
+        exit 2
+        ;;
+esac
