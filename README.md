@@ -1,8 +1,28 @@
 # ZOTAC GAMING ZONE · SteamOS Deep Sleep Fix
 
+> [!WARNING]
+> **Archived / 보관 전용**: SteamOS 3.9.6 (Stable) 이상에서는 별도의 수정 없이 S0ix 절전이 정상 동작하므로 이 프로젝트는 더 이상 필요하지 않으며 보관 전용으로 전환되었습니다.
+> This repository is **archived** and no longer needed as of SteamOS 3.9.6 (Stable), where S0ix sleep works out of the box. See [Issue #1](https://github.com/lightmodegremlin/ZotacZoneSleepModeBatteryFix/issues/1#issuecomment-6984251871).
+
 [한국어](#한국어) · [English](#english)
 
 ## 한국어
+
+> [!NOTE]
+> **보관 안내 (Archived)**
+>
+> SteamOS 3.9.6 (Stable, `BUILD_ID=20261112.101`, 커널 `7.2.7-valve2-2-neptune-72-g31504582a073`) 환경에서 테스트한 결과, 커널 명령줄에 `amd_iommu=off`가 여전히 포함되어 있더라도(`/sys/class/iommu/` 비어 있음) 별도의 IOMMU/GRUB 수정이나 wake source 우회 없이 기본 상태에서 S0ix 진입 및 유지가 정상 동작함을 확인했습니다. ([관련 코멘트](https://github.com/lightmodegremlin/ZotacZoneSleepModeBatteryFix/issues/1#issuecomment-6984251871))
+>
+> 따라서 이 저장소는 **보관 전용(read-only archive)** 으로 유지되며 추가 업데이트는 제공되지 않습니다. 이미 설치하신 분은 아래 명령어로 제거 및 원복하실 수 있습니다.
+>
+> ```bash
+> sudo ./install.sh uninstall
+> sudo reboot
+> ```
+
+---
+
+아래는 과거 SteamOS 3.8.x 계열을 위해 작성되었던 기존 문서입니다.
 
 ZOTAC GAMING ZONE에서 SteamOS 대기모드가 수 초 만에 끝나거나 배터리를
 과도하게 소모하는 문제를 위한, 검증된 수정과 측정 도구입니다.
@@ -94,6 +114,22 @@ systemd/udev 설정 및 wake source 변경을 되돌립니다. 설치 후 사용
 거부합니다.
 
 ## English
+
+> [!NOTE]
+> **Archived**
+>
+> Tested on a ZOTAC GAMING ZONE running stock SteamOS 3.9.6 (Stable, `BUILD_ID=20261112.101`, kernel `7.2.7-valve2-2-neptune-72-g31504582a073`): S0ix entry and residency work properly out of the box without needing any IOMMU/GRUB or wakeup workarounds, even with `amd_iommu=off` still present on the kernel command line (`/sys/class/iommu/` is empty). ([Issue #1 comment](https://github.com/lightmodegremlin/ZotacZoneSleepModeBatteryFix/issues/1#issuecomment-6984251871))
+>
+> Accordingly, this repository is **archived (read-only)** and is no longer maintained. If you previously installed this workaround, you can uninstall it and restore your original configuration with:
+>
+> ```bash
+> sudo ./install.sh uninstall
+> sudo reboot
+> ```
+
+---
+
+The documentation below is preserved for historical reference (originally written for SteamOS 3.8.x).
 
 This repository fixes excessive suspend drain and immediate wakeups on the
 ZOTAC GAMING ZONE running stock SteamOS.
